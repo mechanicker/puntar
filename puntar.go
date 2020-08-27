@@ -3,11 +3,11 @@ package main
 import (
 	"archive/tar"
 	"flag"
-	"fmt"
 	"io"
 	"log"
 	"os"
 	"sync"
+	"syscall"
 )
 
 type jobInfo struct {
@@ -17,17 +17,19 @@ type jobInfo struct {
 
 func main() {
 	tarFile := flag.String("file", "", "tar file to extract")
-	isVerbose := flag.Bool("verbose", false, "enable verbose logging")
 	numWorkers := flag.Uint("workers", 4, "number of concurrent workers")
+	isUpdate := flag.Bool("update", false, "update existing target")
+	isVerbose := flag.Bool("verbose", false, "enable verbose logging")
 	flag.Parse()
 
 	if len(*tarFile) == 0 {
-		log.Fatal("error: missing archive file to extract")
+		flag.Usage()
+		log.Fatalf("%v: missing archive file to extract", os.ErrInvalid)
 	}
 
 	tarFh, err := os.Open(*tarFile)
 	if err != nil {
-		log.Fatalf("error: failed to open archive file \"%s\" to extract with error: %v", *tarFile, err)
+		log.Fatalf("failed to open tar file \"%s\" with error: %v", *tarFile, err)
 	}
 	defer func() { _ = tarFh.Close() }()
 
@@ -37,7 +39,7 @@ func main() {
 	worker := func() {
 		srcFh, err := os.Open(*tarFile)
 		if err != nil {
-			log.Fatalf("error %v re-opening tar hdr \"%s\"", err, *tarFile)
+			log.Fatalf("failed to re-open tar file \"%s\" with error: %v", *tarFile, err)
 		}
 
 		defer func() {
@@ -45,25 +47,36 @@ func main() {
 		}()
 
 		for job := range files {
-			if offset, err := srcFh.Seek(job.offset, io.SeekStart); err != nil || offset != job.offset {
-				log.Fatal("failed to seek tar hdr for async hdr extraction")
+			if *isUpdate {
+				if fileInfo, fsErr := os.Stat(job.hdr.Name); fsErr == nil && fileInfo.Size() == job.hdr.Size && fileInfo.Mode() == os.FileMode(job.hdr.Mode) {
+					if *isVerbose {
+						log.Printf("exists: skipping file: %s\n", job.hdr.Name)
+					}
+
+					wg.Done()
+					continue
+				}
 			}
 
-			dstFh, err := os.OpenFile(job.hdr.Name, os.O_CREATE|os.O_RDWR, os.FileMode(job.hdr.Mode))
+			if offset, err := srcFh.Seek(job.offset, io.SeekStart); err != nil || offset != job.offset {
+				log.Fatalf("failed to seek (%d) tar file for async extraction with error: %v", job.offset, err)
+			}
+
+			dstFh, err := os.OpenFile(job.hdr.Name, os.O_CREATE|os.O_TRUNC|os.O_RDWR, os.FileMode(job.hdr.Mode))
 			if err != nil {
-				log.Fatal(err)
+				log.Fatalf("failed to open file \"%s\" for write with error: %v", job.hdr.Name, err)
 			}
 
 			if nb, err := io.CopyN(dstFh, srcFh, job.hdr.Size); err != nil || nb != job.hdr.Size {
-				log.Fatalf("error extracting hdr \"%s\" with error: %v", job.hdr.Name, err)
+				log.Fatalf("failed copying file \"%s\" with error: %v", job.hdr.Name, err)
+			}
+
+			if *isVerbose {
+				log.Printf("%s\n", job.hdr.Name)
 			}
 
 			wg.Done()
 			_ = dstFh.Close()
-
-			if *isVerbose {
-				fmt.Printf("%s\n", job.hdr.Name)
-			}
 		}
 	}
 
@@ -84,12 +97,14 @@ func main() {
 		// extracting files in concurrent goroutines
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if fserr := os.Mkdir(hdr.Name, hdr.FileInfo().Mode()); fserr != nil {
-				log.Fatalf("failed to create directory \"%s\" with error %v", hdr.Name, fserr)
+			if fsErr := os.Mkdir(hdr.Name, hdr.FileInfo().Mode()); fsErr != nil {
+				if pathErr, ok := fsErr.(*os.PathError); !(ok && *isUpdate && pathErr.Err == syscall.EEXIST) {
+					log.Fatalf("failed to create directory \"%s\" with error %v", hdr.Name, fsErr)
+				}
 			}
 
 			if *isVerbose {
-				fmt.Printf("%s\n", hdr.Name)
+				log.Printf("%s\n", hdr.Name)
 			}
 		case tar.TypeReg:
 			if offset, err := tarFh.Seek(0, io.SeekCurrent); err == nil {
@@ -100,7 +115,7 @@ func main() {
 			}
 		default:
 			if *isVerbose {
-				fmt.Printf("skipping type=%d, name=%s\n", hdr.Typeflag, hdr.Name)
+				log.Printf("unsupported: skipping type=%d, name=%s\n", hdr.Typeflag, hdr.Name)
 			}
 		}
 	}
