@@ -27,6 +27,12 @@ func main() {
 		log.Fatalf("%v: missing archive file to extract", os.ErrInvalid)
 	}
 
+	blockSize := int64(1024)
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(*tarFile, &stat); err == nil {
+		blockSize = int64(stat.Bsize)
+	}
+
 	tarFh, err := os.Open(*tarFile)
 	if err != nil {
 		log.Fatalf("failed to open tar file \"%s\" with error: %v", *tarFile, err)
@@ -67,7 +73,14 @@ func main() {
 				log.Fatalf("failed to open file \"%s\" for write with error: %v", job.hdr.Name, err)
 			}
 
+			// Best effort pre-allocate file size to 1 block less that actual file size
+			// On a failed copy, we will have a file that is smaller in size than original
+			_ = dstFh.Truncate(job.hdr.Size - blockSize)
+
 			if nb, err := io.CopyN(dstFh, srcFh, job.hdr.Size); err != nil || nb != job.hdr.Size {
+				// Best effort cleanup of failed extraction
+				_ = os.Remove(dstFh.Name())
+
 				log.Fatalf("failed copying file \"%s\" with error: %v", job.hdr.Name, err)
 			}
 
