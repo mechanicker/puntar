@@ -27,6 +27,18 @@ func main() {
 		log.Fatalf("%v: missing archive file to extract", os.ErrInvalid)
 	}
 
+	// Validate workers count and try to ensure it does not hit open file limits
+	var openFileLimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &openFileLimit); err == nil {
+		// 2 files per worker: Each worker opens the tar file and the destination
+		// 10: stdin, stdout, stderr, event loop, 2 pipes, 1 (main tar file)  + 3 extras
+		if openFileLimit.Cur < uint64(2*(*numWorkers))+10 {
+			flag.Usage()
+			maxWorkers := (openFileLimit.Cur / 2) - 10
+			log.Fatalf("error: too many workers, should be less than: %d", maxWorkers)
+		}
+	}
+
 	blockSize := int64(1024)
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(*tarFile, &stat); err == nil {
@@ -94,7 +106,7 @@ func main() {
 	}
 
 	// Concurrent workers
-	for i := uint(0); i < (*numWorkers); i++ {
+	for i := uint(0); i < *numWorkers; i++ {
 		go worker()
 	}
 
