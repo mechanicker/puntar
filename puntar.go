@@ -75,7 +75,7 @@ func main() {
 
 			// Best effort pre-allocate file size to 1 block less that actual file size
 			// On a failed copy, we will have a file that is smaller in size than original
-			_ = dstFh.Truncate(job.hdr.Size - blockSize)
+			_ = expandFile(int(dstFh.Fd()), job.hdr.Size-blockSize)
 
 			if nb, err := io.CopyN(dstFh, srcFh, job.hdr.Size); err != nil || nb != job.hdr.Size {
 				// Best effort cleanup of failed extraction
