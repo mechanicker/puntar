@@ -30,11 +30,12 @@ func main() {
 	// Validate workers count and try to ensure it does not hit open file limits
 	var openFileLimit syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &openFileLimit); err == nil {
-		// 2 files per worker: Each worker opens the tar file and the destination
+		// Each worker opens the destination file
 		// 10: stdin, stdout, stderr, event loop, 2 pipes, 1 (main tar file)  + 3 extras
-		if openFileLimit.Cur < uint64(2*(*numWorkers))+10 {
+		const approxOpenFds = 10
+		if openFileLimit.Cur < uint64(*numWorkers)+approxOpenFds {
 			flag.Usage()
-			maxWorkers := (openFileLimit.Cur / 2) - 10
+			maxWorkers := openFileLimit.Cur - approxOpenFds
 			log.Fatalf("error: too many workers, should be less than: %d", maxWorkers)
 		}
 	}
@@ -45,6 +46,7 @@ func main() {
 		blockSize = int64(stat.Bsize)
 	}
 
+	// Note: tarFh is shared across all workers
 	tarFh, err := os.Open(*tarFile)
 	if err != nil {
 		log.Fatalf("failed to open tar file \"%s\" with error: %v", *tarFile, err)
@@ -55,15 +57,6 @@ func main() {
 	wg := sync.WaitGroup{}
 	files := make(chan jobInfo, *numWorkers)
 	worker := func() {
-		srcFh, err := os.Open(*tarFile)
-		if err != nil {
-			log.Fatalf("failed to re-open tar file \"%s\" with error: %v", *tarFile, err)
-		}
-
-		defer func() {
-			_ = srcFh.Close()
-		}()
-
 		for job := range files {
 			if *isUpdate {
 				if fileInfo, fsErr := os.Stat(job.hdr.Name); fsErr == nil && fileInfo.Size() == job.hdr.Size && fileInfo.Mode() == os.FileMode(job.hdr.Mode) {
@@ -76,10 +69,6 @@ func main() {
 				}
 			}
 
-			if offset, err := srcFh.Seek(job.offset, io.SeekStart); err != nil || offset != job.offset {
-				log.Fatalf("failed to seek (%d) tar file for async extraction with error: %v", job.offset, err)
-			}
-
 			dstFh, err := os.OpenFile(job.hdr.Name, os.O_CREATE|os.O_TRUNC|os.O_RDWR, os.FileMode(job.hdr.Mode))
 			if err != nil {
 				log.Fatalf("failed to open file \"%s\" for write with error: %v", job.hdr.Name, err)
@@ -89,7 +78,8 @@ func main() {
 			// On a failed copy, we will have a file that is smaller in size than original
 			_ = expandFile(int(dstFh.Fd()), job.hdr.Size-blockSize)
 
-			if nb, err := io.CopyN(dstFh, srcFh, job.hdr.Size); err != nil || nb != job.hdr.Size {
+			// copyFile does not depend on position of file descriptor. Hence, allows concurrent reuse
+			if nb, err := copyFile(dstFh, tarFh, job.offset, job.hdr.Size); err != nil || nb != job.hdr.Size {
 				// Best effort cleanup of failed extraction
 				_ = os.Remove(dstFh.Name())
 
@@ -105,12 +95,12 @@ func main() {
 		}
 	}
 
-	// Concurrent workers
+	// Consumers: Concurrent workers for extraction
 	for i := uint(0); i < *numWorkers; i++ {
 		go worker()
 	}
 
-	// Process the tar file
+	// Producer: Read tar file in main goroutine
 	for {
 		hdr, err := tarReader.Next()
 		if err != nil {
