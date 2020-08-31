@@ -33,6 +33,8 @@ $ make GOOS=linux all
 ```
 $ puntar
 Usage of puntar:
+  -dir string
+    	destination directory (default ".")
   -file string
     	tar file to extract
   -update
@@ -48,25 +50,26 @@ Usage of puntar:
 
 ## Results
 
-Extraction of a fairly large tar file over NFS yielded 5x improvement over GNU tar
+Extraction of a fairly large tar file over NFS yielded **5x** improvement over `GNU tar`
 
 ```
 $ ls -sh staging-repo.tar
 248M staging-repo.tar
 
 $ time tar -xf staging-repo.tar
-real	0m10.991s <------- GNU tar
-user	0m0.081s
-sys	0m0.977s
 
-$ mv r-81855 tar-r-81855
+real	0m15.184s
+user	0m0.088s
+sys	0m1.080s
 
-$ time puntar -file staging-repo.tar -workers 502
-real	0m2.150s <------- puntar
-user	0m0.324s
-sys	0m1.109s
+$ time puntar -file staging-repo.tar -workers 1000 -dir test
 
-$ diff -r tar-r-81855 r-81855
+real	0m2.981s
+user	0m0.320s
+sys	0m0.960s
+
+$ diff -r r-81855 test/r-81855
+app-174:~/tmp
 $ echo $?
 0
 ```

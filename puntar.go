@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path"
 	"sync"
 	"syscall"
 )
@@ -17,6 +18,7 @@ type jobInfo struct {
 
 func main() {
 	tarFile := flag.String("file", "", "tar file to extract")
+	destDir := flag.String("dir", ".", "destination directory")
 	numWorkers := flag.Uint("workers", 4, "number of concurrent workers")
 	isUpdate := flag.Bool("update", false, "update existing target")
 	isVerbose := flag.Bool("verbose", false, "enable verbose logging")
@@ -42,8 +44,11 @@ func main() {
 
 	blockSize := int64(1024)
 	var stat syscall.Statfs_t
-	if err := syscall.Statfs(*tarFile, &stat); err == nil {
+	if err := syscall.Statfs(*destDir, &stat); err == nil {
 		blockSize = int64(stat.Bsize)
+	} else {
+		flag.Usage()
+		log.Fatalf("error: statfs on destination directory \"%s\" failed with error: %v", *destDir, err)
 	}
 
 	// Note: tarFh is shared across all workers
@@ -106,6 +111,11 @@ func main() {
 		if err != nil {
 			close(files)
 			break
+		}
+
+		// Resolve path to desired fully qualified destination path
+		if len(hdr.Name) > 0 {
+			hdr.Name = path.Join(*destDir, hdr.Name)
 		}
 
 		// Create directories in main thread to ensure they are available when
